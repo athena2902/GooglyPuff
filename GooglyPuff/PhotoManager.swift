@@ -49,34 +49,55 @@ final class PhotoManager {
   private init() {}
   static let shared = PhotoManager()
   
+  private let concurrentPhotoQueue =
+        DispatchQueue(label: "com.quyetvu.GooglyPuff.photoQueue", attributes: .concurrent)
   private var unsafePhotos: [Photo] = []
   
   var photos: [Photo] {
-    return unsafePhotos
+    var photosCopy: [Photo]!
+    concurrentPhotoQueue.sync {
+        photosCopy = unsafePhotos
+    }
+    return photosCopy
   }
   
   func addPhoto(_ photo: Photo) {
-    unsafePhotos.append(photo)
-    DispatchQueue.main.async { [weak self] in
-      self?.postContentAddedNotification()
+    concurrentPhotoQueue.async(flags: .barrier) { [weak self] in
+        guard let self = self else {
+            return
+        }
+        self.unsafePhotos.append(photo)
+        
+        DispatchQueue.main.async() { [weak self] in
+            self?.postContentAddedNotification()
+        }
     }
   }
   
   func downloadPhotos(withCompletion completion: BatchPhotoDownloadingCompletionClosure?) {
     var storedError: NSError?
-    for address in [PhotoURLString.overlyAttachedGirlfriend,
-                    PhotoURLString.successKid,
-                    PhotoURLString.lotsOfFaces] {
-                      let url = URL(string: address)
-                      let photo = DownloadPhoto(url: url!) { _, error in
-                        if error != nil {
-                          storedError = error
-                        }
-                      }
-                      PhotoManager.shared.addPhoto(photo)
+    let downloadGroup = DispatchGroup()
+    let addresses = [PhotoURLString.overlyAttachedGirlfriend,
+                     PhotoURLString.successKid,
+                     PhotoURLString.lotsOfFaces]
+    
+    let _ = DispatchQueue.global(qos: .userInitiated)
+    DispatchQueue.concurrentPerform(iterations: addresses.count) { (index) in
+        let address = addresses[index]
+        let url = URL(string: address)
+        downloadGroup.enter()
+        let photo = DownloadPhoto(url: url!) { _, error in
+            if error != nil {
+                storedError = error
+            }
+            downloadGroup.leave()
+        }
+        PhotoManager.shared.addPhoto(photo)
     }
     
-    completion?(storedError)
+    downloadGroup.notify(queue: DispatchQueue.main) {
+        completion?(storedError)
+    }
   }
   
   private func postContentAddedNotification() {
